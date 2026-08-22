@@ -13,12 +13,23 @@
       "build": "CodeZip",
       "entrypoint": "main.py",
       "codeLocation": "app/CustomerSupport/",
-      "runtimeVersion": "PYTHON_3_14",
+      "runtimeVersion": "PYTHON_3_13",
       "networkMode": "PUBLIC",
       "protocol": "HTTP",
       "requestHeaderAllowlist": [
-        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"
-      ]
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id",
+        "Authorization"
+      ],
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_lBCPQIpMN/.well-known/openid-configuration",
+          "allowedClients": [
+            "1qf19hmssqimndqtub8741tu51",
+            "1aqba7n68hmlv628ic4j8pfdim"
+          ]
+        }
+      }
     }
   ],
   "memories": [
@@ -47,9 +58,9 @@
   "onlineEvalConfigs": [],
   "agentCoreGateways": [
     {
-      "name": "my-gateway",
+      "name": "my-gateway-secure",
       "protocolType": "None",
-      "description": "Gateway for my-gateway",
+      "description": "Gateway for my-gateway-secure",
       "targets": [
         {
           "name": "WarrantyCheck",
@@ -60,9 +71,28 @@
           }
         }
       ],
-      "authorizerType": "NONE",
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_lBCPQIpMN/.well-known/openid-configuration",
+          "allowedClients": [
+            "1qf19hmssqimndqtub8741tu51",
+            "1aqba7n68hmlv628ic4j8pfdim"
+          ]
+        }
+      },
       "enableSemanticSearch": true,
       "exceptionLevel": "NONE"
+    }
+  ],
+  "unassignedTargets": [
+    {
+      "name": "WarrantyCheck",
+      "targetType": "lambdaFunctionArn",
+      "lambdaFunctionArn": {
+        "lambdaArn": "arn:aws:lambda:us-east-1:040880712607:function:workshop-warranty-check",
+        "toolSchemaFile": "app/CustomerSupport/tool/warranty_schema.json"
+      }
     }
   ],
   "policyEngines": [],

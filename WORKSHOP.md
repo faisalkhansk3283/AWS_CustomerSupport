@@ -189,3 +189,65 @@ agentcore add gateway
 agentcore deploy
 agentcore invoke --prompt "Is my Smart Watch still under warranty?" --session-id s1 --user-id user123
 ```
+
+---
+
+## Lab 4: Securing the Agent with JWT Authentication (Amazon Cognito)
+
+**Objective:** Lock down the agent so only authenticated users can access it, and user identity is cryptographically verified (not self-reported).
+
+**What was lacking before:**
+
+In Labs 1-3, anyone could call the agent and claim to be any user by simply passing a header:
+```bash
+# Anyone could pretend to be Sarah — no verification!
+-H "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id: Sarah"
+```
+This is insecure — a malicious caller could access another user's memories, warranty info, or personal data.
+
+**What Lab 4 adds:**
+
+```
+Before Lab 4 (insecure):
+  Client → "I'm Sarah" (self-reported header) → Agent trusts blindly
+
+After Lab 4 (secure):
+  Client → authenticates with Cognito → receives JWT token
+        → sends token to Agent → Agent verifies token → extracts real username from claims
+```
+
+**Think of it like this:** Before, you could walk into a bank and say "I'm John, show me his account." Now you need to show a government-issued ID (the JWT token) that the bank (AgentCore) validates against the issuer (Cognito).
+
+**What we did:**
+- Added `CUSTOM_JWT` authorizer to the agent runtime — AgentCore now rejects requests without a valid token
+- Configured Cognito as the identity provider (discovery URL + allowed client IDs)
+- Secured the Gateway with the same JWT authorizer — Lambda tools also require auth
+- Modified `main.py` to extract `user_id` from JWT claims (`username` field) instead of a custom header
+- Gateway MCP client now forwards the `Authorization` header so tool calls are also authenticated
+- Added `pyjwt` dependency for token decoding
+- Downgraded runtime to Python 3.13 (compatibility)
+
+**Key changes:**
+| File | Change |
+|------|--------|
+| `agentcore/agentcore.json` | Added JWT authorizer to runtime + gateway, Cognito config |
+| `app/CustomerSupport/main.py` | JWT-based user extraction, auth header forwarding |
+| `app/CustomerSupport/mcp_client/client.py` | Gateway client passes Authorization header |
+| `app/CustomerSupport/pyproject.toml` | Added `pyjwt` dependency |
+
+**How it works:**
+1. User authenticates with Amazon Cognito and receives a JWT access token
+2. Client sends request with `Authorization: Bearer <token>` header
+3. AgentCore Runtime validates the token against Cognito's OIDC discovery endpoint
+4. Agent code decodes the JWT and extracts the `username` claim as `user_id`
+5. Memory and tools now operate on a verified identity — no spoofing possible
+6. Gateway also validates the token before allowing Lambda tool calls
+
+**Commands used:**
+```bash
+# Get a token from Cognito first, then invoke with it:
+agentcore invoke "What's my warranty status?" \
+  --session-id $SESSION_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  --stream
+```
