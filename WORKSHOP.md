@@ -251,3 +251,67 @@ agentcore invoke "What's my warranty status?" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   --stream
 ```
+
+---
+
+## Lab 5: Evaluating Agent Quality with Online Evaluations
+
+**Objective:** Set up continuous quality monitoring so every agent interaction is automatically scored.
+
+**What was lacking before:**
+
+In Labs 1-4, the agent was deployed and secured — but you had no way to know if it was giving **good** answers. Was it picking the right tools? Were customers getting their problems solved? You'd have to manually read every conversation to find out.
+
+**What Lab 5 adds:**
+
+AgentCore Evaluations automatically scores your agent's interactions using LLM-as-a-Judge. It samples live sessions and rates them — no manual review needed.
+
+```
+Before Lab 5:
+  Customer asks question → Agent answers → ??? (hope it was good)
+
+After Lab 5:
+  Customer asks question → Agent answers → Evaluators automatically score:
+    - GoalSuccessRate: Did the agent solve the customer's problem?
+    - Correctness: Was the information accurate?
+    - ToolSelectionAccuracy: Did it pick the right tools?
+```
+
+**What we did:**
+- Added an online evaluation config (`QualityMonitor`) that monitors the CustomerSupport agent
+- Configured three built-in evaluators (GoalSuccessRate, Correctness, ToolSelectionAccuracy)
+- Set sampling rate to 100% (every interaction evaluated; production would use 10-20%)
+- Enabled evaluation immediately on deployment (`enableOnCreate: true`)
+- Deployed and generated test interactions with varied queries (product info, return policy, warranty, multi-tool)
+
+**Key changes:**
+| File | Change |
+|------|--------|
+| `agentcore/agentcore.json` | Added `onlineEvalConfigs` with QualityMonitor |
+
+**Score interpretation:**
+| Score | Meaning | Action |
+|-------|---------|--------|
+| 80-100% | Excellent | Monitor and maintain |
+| 60-80% | Good but improvable | Review low-scoring sessions |
+| Below 60% | Needs attention | Investigate root causes |
+
+**Commands used:**
+```bash
+# Add online eval config
+agentcore add online-eval \
+  --name QualityMonitor \
+  --runtime CustomerSupport \
+  --evaluator Builtin.GoalSuccessRate Builtin.Correctness Builtin.ToolSelectionAccuracy \
+  --sampling-rate 100 \
+  --enable-on-create
+
+# Deploy
+agentcore deploy -y -v
+
+# Run on-demand evaluation
+agentcore run eval \
+  --runtime CustomerSupport \
+  --evaluator Builtin.GoalSuccessRate Builtin.Correctness \
+  --days 1
+```
