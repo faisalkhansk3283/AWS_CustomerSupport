@@ -133,3 +133,59 @@ agentcore validate   # Verify configuration
 ```bash
 agentcore invoke --prompt "What headphones do you have?" --session-id my-session --user-id user123
 ```
+
+---
+
+## Lab 3: AgentCore Gateway — Connecting to AWS Lambda Tools
+
+**Objective:** Connect the agent to an external AWS Lambda function via AgentCore Gateway, so the agent can call services it doesn't own.
+
+**Why this matters:**
+
+Before this lab, all tools were Python functions hardcoded in `main.py`. That works for simple cases, but in the real world:
+- Tool logic may live in separate services (maintained by other teams)
+- Tools may be written in different languages
+- You want to add/remove tools without redeploying the agent
+
+AgentCore Gateway solves this by acting as a **bridge** — it exposes external services (like AWS Lambda functions) as MCP tools that the agent automatically discovers and calls.
+
+```
+Before Lab 3:
+  Agent → Python functions only (get_return_policy, get_product_info)
+
+After Lab 3:
+  Agent → Python functions (get_return_policy, get_product_info)
+       → Gateway → AWS Lambda function (check_warranty)
+```
+
+> **Note:** "Lambda" here refers to **AWS Lambda** (a serverless compute service that runs your code in the cloud), NOT Python's `lambda x: x+1` syntax.
+
+**What we did:**
+- Created an AgentCore Gateway (`my-gateway`) in `agentcore.json`
+- Added a Lambda target (`WarrantyCheck`) pointing to a pre-deployed AWS Lambda function
+- Defined the tool schema in `warranty_schema.json` so the agent knows how to call it
+- Created `get_gateway_mcp_client()` in `mcp_client/client.py` to connect to the gateway
+- Added the gateway MCP client to the agent's tool list
+- Removed `warranty_months` from the local product catalog (warranty is now handled by the Lambda)
+
+**Key changes:**
+| File | Change |
+|------|--------|
+| `agentcore/agentcore.json` | Added `agentCoreGateways` with Lambda target |
+| `app/CustomerSupport/tool/warranty_schema.json` | NEW — Tool schema for `check_warranty` |
+| `app/CustomerSupport/mcp_client/client.py` | Added `get_gateway_mcp_client()` |
+| `app/CustomerSupport/main.py` | Imported gateway client, removed warranty_months from products |
+
+**How it works:**
+1. AgentCore deploys the Gateway and sets `AGENTCORE_GATEWAY_MY_GATEWAY_URL` env var at runtime
+2. The agent connects to the gateway as an MCP client
+3. The gateway exposes `check_warranty` as a discoverable tool (defined by the JSON schema)
+4. When a customer asks about warranty, the agent calls `check_warranty` → Gateway → AWS Lambda
+5. The Lambda function returns warranty status, and the agent relays it to the customer
+
+**Commands used:**
+```bash
+agentcore add gateway
+agentcore deploy
+agentcore invoke --prompt "Is my Smart Watch still under warranty?" --session-id s1 --user-id user123
+```
