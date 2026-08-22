@@ -480,3 +480,54 @@ agentcore add policy --name refund_reason_policy --engine CustomerSupportPolicyE
 # Deploy
 agentcore deploy -y -v
 ```
+
+---
+
+## Lab 7 Bonus: Semantic Guardrails — Blocking Sensitive Information
+
+**Objective:** Add a semantic guardrail that detects and blocks email addresses in refund tool inputs, without changing any agent or Lambda code.
+
+**What this adds on top of Lab 7:**
+
+Lab 7's policies are **deterministic** — they check exact values (amount < 100, reason contains "defective"). This bonus adds a **semantic** policy that uses AI to detect sensitive information (like email addresses) in the tool's input before it reaches the Lambda.
+
+```
+Customer message: "Refund $50 for ORD-123, the defective item had wrong email alice@example.com"
+    ↓
+Agent constructs tool call: reason="...alice@example.com..."
+    ↓
+Gateway evaluates policies:
+    ├─ refund_limit_policy: amount=50 < 100 ✅
+    ├─ refund_reason_policy: contains "defective" ✅
+    └─ BlockSensitiveRefundReasons: EMAIL detected in reason ❌ DENIED
+```
+
+**Key distinction:** This is a **tool-input guardrail**, not a user-message filter. The model sees the customer's message first and constructs tool arguments — the guardrail then evaluates what the model puts in `context.input.reason`.
+
+**What we did:**
+- Added `BlockSensitiveRefundReasons` policy using `BedrockGuardrails::SensitiveInformation`
+- Configured it to detect EMAIL entities with confidence threshold ≥ 0.2
+- Policy enforces at the Gateway boundary before Lambda execution
+
+**Key change:**
+| File | Change |
+|------|--------|
+| `agentcore/agentcore.json` | Added `BlockSensitiveRefundReasons` semantic guardrail policy |
+
+**Possible outcomes when email is in the prompt:**
+1. **Model includes email in reason** → Guardrail detects it → Denies → Model may retry without the address
+2. **Model generalizes the reason** (removes email itself) → Guardrail doesn't trigger → Refund succeeds
+
+Both outcomes are valid — the guardrail is a safety net, not the only defense.
+
+**Commands used:**
+```bash
+agentcore add policy \
+  --name BlockSensitiveRefundReasons \
+  --engine CustomerSupportPolicyEngine \
+  --statement "forbid(...) when guardrails { BedrockGuardrails::SensitiveInformation([\"EMAIL\"], [context.input.reason]).maxConfidenceScore().greaterThanOrEqual(decimal(\"0.2\")) };" \
+  --validation-mode IGNORE_ALL_FINDINGS \
+  --enforcement-mode ACTIVE
+
+agentcore deploy -y -v
+```

@@ -21,11 +21,11 @@
             "gatewayArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:gateway/customersupport-my-gateway-secure-5a5z7ugftc",
             "gatewayUrl": "https://customersupport-my-gateway-secure-5a5z7ugftc.gateway.bedrock-agentcore.us-east-1.amazonaws.com",
             "targets": {
-              "WarrantyCheck": {
-                "targetId": "DTNUF0R06R"
-              },
               "ProcessRefund": {
                 "targetId": "JW7MAFEIUR"
+              },
+              "WarrantyCheck": {
+                "targetId": "DTNUF0R06R"
               }
             }
           }
@@ -58,10 +58,15 @@
             "policyId": "refund_reason_policy-f5p79qesed",
             "policyArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:policy-engine/CustomerSupport_CustomerSupportPolicyEngine-5w60a5y29z/policy/refund_reason_policy-f5p79qesed",
             "engineName": "CustomerSupportPolicyEngine"
+          },
+          "CustomerSupportPolicyEngine/BlockSensitiveRefundReasons": {
+            "policyId": "BlockSensitiveRefundReasons-7mcm5dpbqp",
+            "policyArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:policy-engine/CustomerSupport_CustomerSupportPolicyEngine-5w60a5y29z/policy/BlockSensitiveRefundReasons-7mcm5dpbqp",
+            "engineName": "CustomerSupportPolicyEngine"
           }
         },
         "stackName": "AgentCore-CustomerSupport-default",
-        "deployHash": "bda9aa05098134e2"
+        "deployHash": "239166cc3d507122"
       }
     }
   }

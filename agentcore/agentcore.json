@@ -147,6 +147,13 @@
           "validationMode": "FAIL_ON_ANY_FINDINGS",
           "enforcementMode": "ACTIVE",
           "authorizationPhase": "INITIATE"
+        },
+        {
+          "name": "BlockSensitiveRefundReasons",
+          "statement": "forbid(principal, action == AgentCore::Action::\"ProcessRefund___process_refund\", resource == AgentCore::Gateway::\"arn:aws:bedrock-agentcore:us-east-1:040880712607:gateway/customersupport-my-gateway-secure-5a5z7ugftc\") when guardrails { BedrockGuardrails::SensitiveInformation([\"EMAIL\"], [context.input.reason]).maxConfidenceScore().greaterThanOrEqual(decimal(\"0.2\")) };",
+          "validationMode": "IGNORE_ALL_FINDINGS",
+          "enforcementMode": "ACTIVE",
+          "authorizationPhase": "INITIATE"
         }
       ]
     }
