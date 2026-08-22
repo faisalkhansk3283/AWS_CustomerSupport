@@ -385,3 +385,98 @@ uv run python frontend.py
 | "Do you remember me?" | Long-term memory recall |
 | Send "My name is Alex" then "What's my name?" | Session persistence |
 | Click New Session → "What's my name?" | Session isolation (won't remember) |
+
+---
+
+## Lab 7: Governing Agent Actions with Cedar Policies
+
+**Objective:** Add fine-grained authorization rules so the agent can't perform unrestricted actions — even if a user asks it to.
+
+**What was lacking before:**
+
+In Labs 1-6, authentication answered "who is calling?" but NOT "what are they allowed to do?" Any authenticated user could call any tool with any parameters. If a refund tool existed, a user could request a $10,000 refund and the agent would happily process it.
+
+**What Lab 7 adds:**
+
+```
+Before Lab 7:
+  Authenticated user → Agent → calls any tool with any parameters → no limits
+
+After Lab 7:
+  Authenticated user → Agent → calls tool → Gateway checks Cedar policy:
+    - Is the refund amount < $100? → Allow
+    - Is the refund amount >= $100? → DENY (before it reaches the Lambda)
+    - Does the reason contain "defective"? → Allow
+    - Reason doesn't mention "defective"? → DENY
+```
+
+**Think of it like this:** Authentication is the ID check at the door. Policies are the spending limits on your credit card — even though you're verified, you can't charge $1 million.
+
+**Key concepts:**
+| Concept | What it means |
+|---------|--------------|
+| Policy Engine | Container that holds and evaluates Cedar policies |
+| Cedar Policy | A rule: permit or forbid a tool call based on conditions |
+| ENFORCE mode | Denied requests are blocked at the Gateway |
+| Default Deny | Everything is denied unless explicitly permitted |
+
+**What we did:**
+1. Added a `process_refund` Lambda tool to the gateway (with tool schema)
+2. Created a Policy Engine (`CustomerSupportPolicyEngine`) attached to the gateway in ENFORCE mode
+3. Created three Cedar policies:
+   - `refund_limit_policy` — Permits refunds only when amount < $100
+   - `warranty_check_policy` — Permits warranty checks for all authenticated users
+   - `refund_reason_policy` — Forbids refunds unless reason contains "defective"
+
+**Key changes:**
+| File | Change |
+|------|--------|
+| `app/CustomerSupport/tool/refund_schema.json` | NEW — Tool schema for `process_refund` |
+| `agentcore/agentcore.json` | Added refund gateway target, policy engine, and 3 Cedar policies |
+
+**Why the warranty policy is needed:**
+Cedar uses **default deny**. Once you attach a Policy Engine in ENFORCE mode, every tool needs an explicit `permit` policy. Without one, the warranty tool (which worked fine before) would start failing.
+
+**How policies enforce without changing agent code:**
+- Policies evaluate at the **Gateway boundary** — before the request reaches the Lambda
+- The agent code never changed
+- The Lambda function never changed
+- If the policy denies, the agent simply gets an error back and tells the user it can't do that
+
+**Test results:**
+| Prompt | Result | Why |
+|--------|--------|-----|
+| "Refund $50 for ORD-12345, item was defective" | Allowed | amount < 100 AND reason contains "defective" |
+| "Refund $500 for ORD-67890, full refund" | Denied | amount >= 100 |
+| "Refund $50 for ORD-11111, changed my mind" | Denied | reason doesn't contain "defective" |
+| "Check warranty for PROD-002" | Allowed | explicit permit for all users |
+
+**Commands used:**
+```bash
+# Add refund tool to gateway
+agentcore add gateway-target \
+  --type lambda-function-arn \
+  --name ProcessRefund \
+  --lambda-arn $REFUND_LAMBDA_ARN \
+  --tool-schema-file app/CustomerSupport/tool/refund_schema.json \
+  --gateway my-gateway-secure
+
+# Create policy engine
+agentcore add policy-engine \
+  --name CustomerSupportPolicyEngine \
+  --attach-to-gateways my-gateway-secure \
+  --attach-mode ENFORCE
+
+# Add policies
+agentcore add policy --name refund_limit_policy --engine CustomerSupportPolicyEngine \
+  --statement "permit(...) when { context.input.amount < 100 };"
+
+agentcore add policy --name warranty_check_policy --engine CustomerSupportPolicyEngine \
+  --statement "permit(...) when { principal is AgentCore::OAuthUser };"
+
+agentcore add policy --name refund_reason_policy --engine CustomerSupportPolicyEngine \
+  --statement "forbid(...) unless { ((context.input).reason) like \"*defective*\" };"
+
+# Deploy
+agentcore deploy -y -v
+```
