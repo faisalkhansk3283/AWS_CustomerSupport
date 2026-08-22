@@ -531,3 +531,111 @@ agentcore add policy \
 
 agentcore deploy -y -v
 ```
+
+---
+
+## Lab 8: Zero-Code Agents with AgentCore Harness
+
+**Objective:** Create a fully functional agent using only CLI configuration — no Python code, no dependencies, no build step.
+
+### How Harness Relates to CustomerSupport (Key Clarification)
+
+**The Harness (OrderResearchAgent) is a completely SEPARATE agent from CustomerSupport. They are siblings, NOT parent-child.**
+
+```
+                     ┌─────────────────────────────┐
+                     │       AgentCore Gateway       │
+                     │      (my-gateway-secure)      │
+                     │                               │
+                     │  Tools:                       │
+                     │  ├─ check_warranty (Lambda)   │
+                     │  └─ process_refund (Lambda)   │
+                     │                               │
+                     │  Policies (Cedar):            │
+                     │  ├─ refund_limit < $100       │
+                     │  ├─ reason must be "defective"│
+                     │  └─ block emails in reason    │
+                     └──────────────┬────────────────┘
+                                    │
+                     ┌──────────────┼──────────────┐
+                     │              │              │
+          ┌──────────▼───┐   ┌─────▼──────────────▼┐
+          │ CustomerSupport│   │ OrderResearchAgent   │
+          │ (Runtime Agent)│   │ (Harness Agent)      │
+          │                │   │                      │
+          │ • Python code  │   │ • ZERO code          │
+          │ • main.py      │   │ • Just harness.json  │
+          │ • Local tools  │   │ • Code Interpreter   │
+          │ • MCP client   │   │ • Shell access       │
+          │ • Memory module│   │ • Inline functions   │
+          │ • JWT auth     │   │ • OAuth M2M auth     │
+          │ (user token)   │   │ (machine token)      │
+          └────────────────┘   └──────────────────────┘
+```
+
+**Common questions answered:**
+
+| Question | Answer |
+|----------|--------|
+| If CustomerSupport is offline, does Harness break? | **No.** They are independent. Harness talks to the Gateway directly. |
+| Do they share the same Lambda tools? | **Yes.** Both connect to the same Gateway, so both can call `check_warranty` and `process_refund`. |
+| Do the same policies apply to both? | **Yes.** Policies are on the Gateway — they don't care which agent is calling. |
+| How does Harness authenticate to the Gateway? | **OAuth client_credentials** (machine-to-machine). CustomerSupport forwards the user's JWT. Different auth methods, same Gateway. |
+| Why use Harness instead of writing code? | When you don't need custom orchestration — just model + prompt + tools. Faster to deploy, no dependencies to manage. |
+
+### What we did:
+
+1. **Created the Harness** — Declared an agent with model, system prompt, and code interpreter tool (one CLI command)
+2. **Connected to existing Gateway** — Reused the same secured Gateway from Labs 3-7 with OAuth outbound auth
+3. **Created OAuth credential** — Machine-to-machine auth so the Harness can call the JWT-protected Gateway
+4. **Deployed** — Single command, no build step needed
+5. **Tested Gateway tools** — Warranty checks and policy-blocked refunds worked identically to CustomerSupport
+6. **Used Shell access** — Ran commands inside the Harness microVM (`--exec`)
+7. **Tested filesystem persistence** — Files created in one invocation persist across the session
+8. **Overrode model per invocation** — Switched to Nova Lite without redeploying
+9. **Verified policy enforcement** — $500 refund denied (same policies apply)
+10. **Added Human-in-the-Loop** — Inline function that pauses the agent for manager approval, then resumes
+
+**Key files created:**
+| File | Purpose |
+|------|---------|
+| `app/OrderResearchAgent/harness.json` | Declarative agent config (model, tools, prompt) |
+| `app/OrderResearchAgent/system-prompt.md` | System prompt for the agent |
+| `app/OrderResearchAgent/test_hitl.py` | Python script testing Human-in-the-Loop flow |
+
+**Human-in-the-Loop (HITL) flow:**
+```
+1. User asks for $200 refund
+2. Agent tries process_refund → Gateway policy blocks it (>$100)
+3. Agent calls approve_exception (inline function) → Harness PAUSES
+4. Script detects pause, prompts human: "Approve? (yes/no)"
+5. Human types "yes"
+6. Script sends approval back → Harness RESUMES
+7. Agent reports: "Approved by Manager Jane"
+```
+
+**Commands used:**
+```bash
+# Create harness (zero code!)
+agentcore add harness \
+  --name OrderResearchAgent \
+  --model-provider bedrock \
+  --model-id us.anthropic.claude-sonnet-4-6 \
+  --system-prompt "You are an order research specialist..." \
+  --tools agentcore_code_interpreter
+
+# Connect to existing secured gateway
+agentcore add credential --type oauth --name gateway-egress-oauth ...
+agentcore add tool --harness OrderResearchAgent --type agentcore_gateway \
+  --name my-gateway-secure --gateway-arn "$GATEWAY_ARN" \
+  --outbound-auth oauth --grant-type CLIENT_CREDENTIALS
+
+# Add human-in-the-loop tool
+agentcore add tool --harness OrderResearchAgent --type inline_function \
+  --name approve_exception \
+  --description "Request manager approval for refunds exceeding automated limit"
+
+# Deploy and test
+agentcore deploy -y -v
+agentcore invoke --harness OrderResearchAgent --session-id "$SESSION" "..."
+```
