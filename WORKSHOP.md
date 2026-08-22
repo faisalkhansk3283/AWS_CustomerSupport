@@ -315,3 +315,73 @@ agentcore run eval \
   --evaluator Builtin.GoalSuccessRate Builtin.Correctness \
   --days 1
 ```
+
+---
+
+## Lab 6: Web Chat Frontend (Flask)
+
+**Objective:** Build a web chat interface so users can interact with the agent through a browser instead of the terminal.
+
+**What was lacking before:**
+
+In Labs 1-5, the only way to talk to the agent was via `agentcore invoke` in the terminal with a bearer token. Real customers need a proper chat UI.
+
+**What Lab 6 adds:**
+
+```
+Before Lab 6:
+  Terminal → agentcore invoke --bearer-token ... → Agent
+
+After Lab 6:
+  Browser → Flask server (authenticates with Cognito on startup)
+         → Serves HTML page with token + runtime ARN injected
+         → Browser calls AgentCore REST API directly
+         → Streaming response displayed in chat UI
+```
+
+**How it works:**
+1. Flask server starts and authenticates with Cognito (same `USER_PASSWORD_AUTH` flow from Lab 4)
+2. User opens the page — Flask injects the access token and runtime ARN into the HTML
+3. User types a message in the chat
+4. Browser calls the AgentCore REST API directly with `Authorization: Bearer` header
+5. AgentCore validates the JWT, processes the request through the agent
+6. Streaming response is displayed in the chat bubble
+
+**What we created:**
+| File | Purpose |
+|------|---------|
+| `app/CustomerSupport/frontend/__init__.py` | Package marker |
+| `app/CustomerSupport/frontend/frontend.py` | Flask server — Cognito auth, serves chat page |
+| `app/CustomerSupport/frontend/templates/index.html` | Chat UI — calls AgentCore API directly from browser |
+
+**Key design decisions:**
+- **Why not boto3?** boto3's `invoke_agent_runtime` uses IAM (SigV4) auth. Our runtime uses Custom JWT auth, so we call the REST API directly with a Bearer token.
+- **Why Flask and not just a static page?** Flask handles Cognito authentication server-side on startup and injects the token into the page. The browser never sees credentials.
+- **Session management:** Each browser tab gets a unique `sessionId` (UUID). Clicking "New Session" generates a fresh one, resetting conversation context.
+
+**Dependencies added:** `flask`, `boto3`, `requests`
+
+**Commands used:**
+```bash
+# Install dependencies
+cd app/CustomerSupport
+uv add flask boto3 requests
+
+# Create frontend structure
+mkdir -p app/CustomerSupport/frontend/templates
+
+# Run the frontend
+cd app/CustomerSupport/frontend
+uv run python frontend.py
+# Opens on http://localhost:8501
+```
+
+**Testing the UI:**
+| Action | What it tests |
+|--------|--------------|
+| "What products do you have?" | Product lookup (local tool) |
+| "What's the return policy for electronics?" | Return policy (local tool) |
+| "Check warranty for PROD-002" | Warranty check (Gateway → Lambda) |
+| "Do you remember me?" | Long-term memory recall |
+| Send "My name is Alex" then "What's my name?" | Session persistence |
+| Click New Session → "What's my name?" | Session isolation (won't remember) |
