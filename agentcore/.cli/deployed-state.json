@@ -78,13 +78,31 @@
             "harnessArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:harness/CustomerSupport_OrderResearchAgent-QoQBsXLSq3",
             "roleArn": "arn:aws:iam::040880712607:role/CustomerSupport_OrderResearchAgent",
             "status": "READY",
-            "harnessVersion": 2,
+            "harnessVersion": 3,
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:runtime/harness_CustomerSupport_OrderResearchAgent-U5ATOnAGkb",
+            "provisioner": "cloudformation"
+          },
+          "PersistentReportAgent": {
+            "harnessId": "CustomerSupport_PersistentReportAgent-y8dvJAwdSr",
+            "harnessArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:harness/CustomerSupport_PersistentReportAgent-y8dvJAwdSr",
+            "roleArn": "arn:aws:iam::040880712607:role/CustomerSupport_PersistentReportAgent",
+            "status": "READY",
+            "harnessVersion": 1,
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:runtime/harness_CustomerSupport_PersistentReportAgent-ggO0iOAqs0",
+            "provisioner": "cloudformation"
+          },
+          "ContainerAgent": {
+            "harnessId": "CustomerSupport_ContainerAgent-btpNIRg287",
+            "harnessArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:harness/CustomerSupport_ContainerAgent-btpNIRg287",
+            "roleArn": "arn:aws:iam::040880712607:role/CustomerSupport_ContainerAgent",
+            "status": "READY",
+            "harnessVersion": 1,
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:040880712607:runtime/harness_CustomerSupport_ContainerAgent-LgRx1g5ZVJ",
             "provisioner": "cloudformation"
           }
         },
         "stackName": "AgentCore-CustomerSupport-default",
-        "deployHash": "dbe135105c3c8420"
+        "deployHash": "d3e779411ef32eab"
       }
     }
   }

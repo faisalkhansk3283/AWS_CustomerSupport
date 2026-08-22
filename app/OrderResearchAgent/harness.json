@@ -57,7 +57,12 @@
       }
     }
   ],
-  "skills": [],
+  "skills": [
+    {
+      "gitUrl": "https://github.com/anthropics/skills",
+      "path": "skills/xlsx"
+    }
+  ],
   "memory": {
     "mode": "disabled"
   }

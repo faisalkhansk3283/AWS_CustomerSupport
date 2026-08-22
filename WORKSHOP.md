@@ -582,6 +582,81 @@ agentcore deploy -y -v
 | Do the same policies apply to both? | **Yes.** Policies are on the Gateway — they don't care which agent is calling. |
 | How does Harness authenticate to the Gateway? | **OAuth client_credentials** (machine-to-machine). CustomerSupport forwards the user's JWT. Different auth methods, same Gateway. |
 | Why use Harness instead of writing code? | When you don't need custom orchestration — just model + prompt + tools. Faster to deploy, no dependencies to manage. |
+| Does Harness have a UI? | **No.** It's CLI/API only — meant for internal analysts, not end customers. |
+| Does Harness have per-user memory? | **No** (disabled by default). It uses a single app identity, not individual user tokens. |
+
+### Understanding Authentication: How Both Agents Get Tokens
+
+**The Gateway requires a JWT token from anyone calling it.** The two agents get tokens differently:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        COGNITO (Token Factory)                         │
+│                                                                        │
+│  Has two types of "accounts":                                         │
+│                                                                        │
+│  1. USER ACCOUNT (for humans)        2. APP CLIENT (for software)     │
+│     username: workshopuser@...          client_id: 1aqba7n68h...      │
+│     password: WorkshopPass1!            client_secret: xyz789...      │
+│     → Used by Flask/browser             → Used by Harness             │
+│                                                                        │
+│  Both produce a valid JWT token — just obtained differently            │
+└────────────────────┬───────────────────────────┬──────────────────────┘
+                     │                           │
+                     ▼                           ▼
+        ┌────────────────────┐       ┌────────────────────┐
+        │  CustomerSupport    │       │  Harness            │
+        │                    │       │                    │
+        │  Human types       │       │  Code sends        │
+        │  username+password │       │  client_id+secret  │
+        │  → gets JWT        │       │  → gets JWT        │
+        │  → forwards to GW  │       │  → forwards to GW  │
+        └────────────────────┘       └────────────────────┘
+```
+
+**Analogy:** Cognito is a building security desk:
+- Employees badge in with name + photo (username/password) → get a visitor pass (JWT)
+- The cleaning robot has a special access code (client_id/secret) → also gets a pass (JWT)
+- Both passes open the same doors (Gateway) — they're just issued to different entities
+
+### Where Do the Credentials Come From?
+
+The workshop organizers pre-created everything in Cognito before Lab 1. They stored the values in **SSM Parameter Store** (a key-value config store in AWS):
+
+```
+/app/customersupport/agentcore/client_id          → machine app client_id (for Harness)
+/app/customersupport/agentcore/web_client_id      → web app client_id (for Flask/humans)
+/app/customersupport/agentcore/pool_id            → Cognito User Pool ID
+/app/customersupport/agentcore/cognito_auth_scope → what permissions the token grants
+/app/customersupport/agentcore/cognito_discovery_url → where to validate tokens
+```
+
+In Lab 8, you just READ these values with `aws ssm get-parameter` and passed them to `agentcore add credential`. You didn't create the Cognito setup — you just used what was already there.
+
+### The Full Token Flow for Harness (Step by Step)
+
+```
+1. You run: agentcore invoke --harness OrderResearchAgent "Check warranty for PROD-001"
+
+2. Harness needs to call the Gateway → needs a token
+
+3. Harness asks AgentCore Token Vault: "Get me a token using gateway-egress-oauth"
+
+4. Token Vault calls Cognito:
+   POST /oauth2/token
+   Body: grant_type=client_credentials, client_id=1aqba..., client_secret=xyz...
+
+5. Cognito checks: "Is this client_id + secret valid?" → Yes
+   Cognito returns: { "access_token": "eyJhbG...", "expires_in": 3600 }
+
+6. Harness calls Gateway: "Authorization: Bearer eyJhbG..."
+
+7. Gateway validates: "Was this JWT signed by my trusted Cognito?" → Yes ✅
+   Gateway checks Cedar policies → Allowed ✅
+   Gateway calls Lambda → returns warranty info
+
+8. Harness returns result to you in the terminal
+```
 
 ### What we did:
 
@@ -639,3 +714,61 @@ agentcore add tool --harness OrderResearchAgent --type inline_function \
 agentcore deploy -y -v
 agentcore invoke --harness OrderResearchAgent --session-id "$SESSION" "..."
 ```
+
+### Lab 8 Bonus: Advanced Harness Features
+
+**What we explored:**
+
+#### 1. Agent Skills (xlsx)
+Added a markdown-based skill bundle from Anthropic's open library that teaches the agent how to create professional Excel reports. Skills are domain-specific instructions the model loads automatically — no fine-tuning needed.
+
+```bash
+agentcore add skill --harness OrderResearchAgent \
+  --git https://github.com/anthropics/skills \
+  --git-path skills/xlsx
+```
+
+**Result:** The agent created a formatted `.xlsx` file with color-coded warranty statuses, frozen headers, and a summary section.
+
+#### 2. Session Storage Mount (PersistentReportAgent)
+Files normally disappear when a session ends. `--session-storage` mounts a persistent path so reports survive across stop/resume cycles.
+
+```bash
+agentcore add harness --name PersistentReportAgent \
+  --session-storage /mnt/reports/ ...
+```
+
+#### 3. Custom Container (ContainerAgent)
+Provides a pre-configured environment (installed tools like git, node, terraform) without replacing the agent's brain. The container is the "laptop" the agent uses, not the agent itself.
+
+```bash
+agentcore add harness --name ContainerAgent \
+  --container public.ecr.aws/docker/library/node:slim ...
+```
+
+**Why separate harnesses for each bonus?**
+Harnesses are **immutable once created** — there's no `agentcore update harness`. To change fundamental config (storage mounts, container image), you create a new one. That's a design choice: each harness is a versioned, reproducible agent definition.
+
+### What is a "Harness" as a Concept?
+
+A Harness is a **standardized, declarative agent format** — an AgentCore resource type (like `runtime`, `memory`, `gateway`). It has:
+- Its own ARN (e.g., `arn:aws:bedrock-agentcore:...:harness/OrderResearchAgent-...`)
+- Version numbers (incremented on each deploy)
+- A fixed schema: model + prompt + tools + skills + memory + container + storage
+
+```
+Building an agent FROM CODE (Runtime):       Building an agent FROM CONFIG (Harness):
+  - Write main.py                              - Write harness.json
+  - Manage dependencies (pyproject.toml)       - No dependencies
+  - Handle orchestration yourself              - AgentCore handles orchestration
+  - Full flexibility                           - Standardized but limited
+  - Like building a car from parts             - Like ordering a car from a menu
+```
+
+**When to use which:**
+| Use Runtime (code) when... | Use Harness (config) when... |
+|---|---|
+| You need custom orchestration | Model + prompt + tools is enough |
+| You need custom memory logic | Default memory behavior works |
+| You need complex tool chaining | Tools are independent |
+| You're building for end-users with a UI | You're building for internal/CLI use |
