@@ -772,3 +772,422 @@ Building an agent FROM CODE (Runtime):       Building an agent FROM CONFIG (Harn
 | You need custom memory logic | Default memory behavior works |
 | You need complex tool chaining | Tools are independent |
 | You're building for end-users with a UI | You're building for internal/CLI use |
+
+---
+
+## Lab 9: Data-Driven Optimization — Recommendations & A/B Testing
+
+**Objective:** Use real agent traces to generate AI-optimized prompts and tool descriptions, then validate improvements with a controlled A/B test on live traffic.
+
+### What was lacking before:
+
+In Labs 1-8, you built a working agent with tools, memory, auth, policies, monitoring, UI, and harnesses. But how do you know the system prompt is optimal? How do you know the tool descriptions help the model pick the right tool? You don't — you're guessing.
+
+**Lab 9 closes the loop:** traces → analysis → recommendations → A/B test → promote winner → repeat.
+
+```
+Before Lab 9:
+  You write prompts → deploy → hope they're good → never validate
+
+After Lab 9:
+  Agent runs → traces collected automatically (OpenTelemetry)
+  → AI coach analyzes traces → recommends better prompts/tool descriptions
+  → Package as config bundles (control vs treatment)
+  → A/B test splits live traffic 80/20
+  → Online eval scores both variants
+  → Statistical significance → promote winner
+  → Winner's traces become baseline for next round
+```
+
+### How Traces Get Collected (No Extra Code Needed)
+
+```
+pyproject.toml includes:
+  "aws-opentelemetry-distro"      ← auto-instruments every agent call
+
+Agent runs → OpenTelemetry captures:
+  • Which tools were called and in what order
+  • What the model received (system prompt, user message)
+  • What the model responded
+  • How long each step took
+  • Whether the user's goal was achieved (from online eval)
+
+These traces are stored in AgentCore and queryable via CLI.
+```
+
+**You never added tracing code to main.py.** The `aws-opentelemetry-distro` dependency auto-instruments everything at startup. The `agentcore run recommendation` command reads these stored traces.
+
+### Step 1: Generate Recommendations from Traces
+
+The optimizer reads your agent's real interaction traces and identifies improvements:
+
+```bash
+# System prompt recommendation
+agentcore run recommendation \
+  --type system-prompt \
+  --runtime CustomerSupport \
+  --name cs-prompt-rec \
+  --days 1
+
+# Tool description recommendation
+agentcore run recommendation \
+  --type tool-description \
+  --runtime CustomerSupport \
+  --name cs-tool-rec \
+  --days 1
+```
+
+**What the optimizer found:**
+
+| Recommendation Type | What it analyzed | What it improved |
+|---|---|---|
+| System Prompt | Agent behavior across all sessions | Added structured response format, explicit tool-usage rules, professional tone guidance |
+| Tool: `get_return_policy` | Agent sometimes guessed category instead of looking up product first | Added: "valid values are electronics/accessories/audio" + "derive category from product info, don't guess" |
+| Tool: `get_product_info` | Agent uses both IDs and names, often in parallel with warranty | Added: exact response fields listed, parallel-call hint |
+| Tool: `check_warranty` | 100% success rate, always PROD-XXX format | Added: exact response format (status, expiry date), parallel-call guidance |
+
+**Why better descriptions matter:** The model reads tool descriptions to decide WHICH tool to call and HOW. Vague descriptions = wrong tool choices. Precise descriptions = fewer mistakes, better scores.
+
+### Step 2: Create a Dedicated A/B Runtime (CustomerSupportAB)
+
+**Why a separate runtime?**
+
+Your `CustomerSupport` runtime uses `CUSTOM_JWT` auth (Lab 4). The Gateway invokes A/B targets using SigV4/IAM auth. These are incompatible — the Gateway's SigV4 call would get rejected with "Authorization method mismatch."
+
+Solution: Deploy a lightweight A/B-specific runtime that keeps the default IAM authorizer:
+
+```
+Client (Cognito JWT) → Gateway ──┬── Bundle v1 (control)   ──(SigV4)──→ CustomerSupportAB Runtime
+                                 └── Bundle v2 (treatment) ──(SigV4)──→ CustomerSupportAB Runtime
+```
+
+**Security note:** CustomerSupportAB is NOT unauthenticated — it uses IAM auth, so only the Gateway's execution role can invoke it. It's a scoped, disposable runtime for experimentation.
+
+```bash
+agentcore add agent \
+  --name CustomerSupportAB \
+  --language Python \
+  --framework Strands \
+  --model-provider Bedrock \
+  --memory none \
+  --build CodeZip
+```
+
+**Key file created:**
+| File | Purpose |
+|------|---------|
+| `app/CustomerSupportAB/main.py` | Config-bundle-aware agent — reads system prompt from active bundle at runtime via `BeforeModelCallEvent` hook |
+
+**How the AB agent differs from CustomerSupport:**
+| Feature | CustomerSupport | CustomerSupportAB |
+|---------|----------------|-------------------|
+| Auth | CUSTOM_JWT (user tokens) | IAM (Gateway only) |
+| Memory | SharedMemory (per-user) | None (stateless) |
+| System prompt | Hardcoded in main.py | Read from config bundle dynamically |
+| Purpose | Production agent for customers | Experimentation runtime for A/B tests |
+| Gateway client | Forwards user JWT | Not needed (Gateway calls IT) |
+
+### Step 3: Configuration Bundles
+
+A **config bundle** is a versioned, immutable snapshot of agent configuration that can be swapped at runtime without redeploying code. The agent reads its active bundle on each invocation.
+
+```bash
+# Control — current prompt (baseline)
+agentcore add config-bundle \
+  --name customerSupportControl \
+  --commit-message "Baseline prompt" \
+  --components '{"{{runtime:CustomerSupportAB}}": {"configuration": {"system_prompt": "..."}}}'
+
+# Treatment — AI-recommended prompt
+agentcore add config-bundle \
+  --name customerSupportTreatment \
+  --commit-message "Recommended prompt from cs-prompt-rec" \
+  --components "$(jq -n --arg prompt "$RECOMMENDED_PROMPT" '...')"
+```
+
+**Think of it like this:**
+- Config bundle = a "settings preset" for the agent
+- Control = your current settings
+- Treatment = the new settings you want to test
+- The agent code stays identical — only the config it reads changes
+
+### Step 4: Online Eval for A/B Runtime
+
+The `QualityMonitor` from Lab 5 is bound to the CustomerSupport runtime's log group — it won't score CustomerSupportAB sessions. Created a dedicated eval:
+
+```bash
+agentcore add online-eval \
+  --name ABQualityMonitor \
+  --runtime CustomerSupportAB \
+  --evaluator Builtin.GoalSuccessRate \
+  --sampling-rate 100 \
+  --enable-on-create
+```
+
+### Step 5: Launch the A/B Test
+
+```bash
+agentcore run ab-test \
+  --mode config-bundle \
+  --name cs_prompt_abtest \
+  --gateway my-gateway-secure \
+  --runtime CustomerSupportAB \
+  --control-bundle customerSupportControl \
+  --control-version LATEST \
+  --treatment-bundle customerSupportTreatment \
+  --treatment-version LATEST \
+  --online-eval ABQualityMonitor \
+  --control-weight 80 \
+  --treatment-weight 20
+```
+
+**Traffic split:**
+- 80% of new sessions → Control (current prompt)
+- 20% of new sessions → Treatment (AI-recommended prompt)
+- Both variants run on the same CustomerSupportAB runtime
+- The Gateway assigns each new session to one variant and sticks with it
+
+### Step 6: Policy Mode Change for A/B Traffic
+
+The Cedar policies from Lab 7 are in ENFORCE mode and would block the A/B target (no permit exists for it). Switched to LOG_ONLY for the test:
+
+```bash
+jq '(.agentCoreGateways[] | select(.name == "my-gateway-secure") | .policyEngineConfiguration.mode) = "LOG_ONLY"' \
+  agentcore/agentcore.json > agentcore/agentcore.json.tmp \
+  && mv agentcore/agentcore.json.tmp agentcore/agentcore.json
+
+agentcore deploy -y -v
+```
+
+**LOG_ONLY mode:** Policies are still evaluated and logged (you can see what would have been blocked), but they don't actually deny requests. This is the standard approach during experimentation.
+
+### Step 7: Load Generation & Results
+
+Sent 30 requests through the Gateway using a load-gen script with 6 rotating prompts:
+
+| Prompt | What it tests |
+|--------|---------------|
+| "What's the price of the Smart Watch?" | Product lookup (get_product_info) |
+| "My headphones are broken, what should I do?" | Return policy + product knowledge |
+| "Is PROD-002 still under warranty?" | Warranty check (Gateway → Lambda) |
+| "What's the return policy for audio products?" | Return policy by category |
+| "It stopped working. Can I get a refund?" | Ambiguous request (needs clarification) |
+| "I want to return my USB-C Hub and check its warranty." | Multi-tool: product lookup + return policy + warranty |
+
+**A/B Test Status:**
+```json
+{
+  "id": "customersupport_cs_prompt_abtest-9434239c01",
+  "status": "ACTIVE",
+  "lifecycleStatus": "RUNNING",
+  "variants": [
+    {"name": "C", "weight": 80, "bundle": "customerSupportControl"},
+    {"name": "T1", "weight": 20, "bundle": "customerSupportTreatment"}
+  ]
+}
+```
+
+**Interpreting results (when they arrive ~15 min after traffic):**
+
+| Result | Interpretation | Action |
+|--------|---------------|--------|
+| p-value < 0.05 AND positive percentChange | Treatment is significantly better | Promote the treatment |
+| p-value < 0.05 AND negative percentChange | Treatment is significantly worse | Keep the control |
+| p-value >= 0.05 | Not enough evidence yet | Keep collecting samples or raise treatment weight |
+
+```bash
+# Check results
+agentcore view ab-test $AB_TEST_ID --json
+
+# Stop and archive when done
+agentcore stop ab-test -i $AB_TEST_ID
+agentcore archive ab-test -i $AB_TEST_ID
+```
+
+### Actual A/B Test Results
+
+```json
+{
+  "analysisTimestamp": 1787440441.265,
+  "evaluatorMetrics": [{
+    "evaluator": "Builtin.GoalSuccessRate",
+    "controlStats": {"mean": 0.50, "sampleSize": 24, "variantName": "C"},
+    "variantResults": [{
+      "mean": 0.50,
+      "sampleSize": 6,
+      "percentChange": 0,
+      "pValue": 1.0,
+      "isSignificant": false,
+      "confidenceInterval": {"lower": -0.4473, "upper": 0.4473},
+      "variantName": "T1"
+    }]
+  }]
+}
+```
+
+| Metric | Control (C) | Treatment (T1) | Result |
+|--------|-------------|----------------|--------|
+| GoalSuccessRate mean | 0.50 | 0.50 | Tied |
+| Sample size | 24 sessions | 6 sessions | Low power |
+| percentChange | — | 0% | No difference |
+| pValue | — | 1.0 | Not significant |
+| isSignificant | — | false | Cannot reject null hypothesis |
+| Confidence interval | — | [-0.45, +0.45] | Crosses zero (inconclusive) |
+
+**Verdict: INCONCLUSIVE — keep the control.**
+
+**Why no winner was detected:**
+- Only 6 treatment samples (20% of 30 = ~6 sessions) — far too few for statistical power
+- Both scored 50% GoalSuccessRate — the prompts performed equivalently at this scale
+- The confidence interval [-0.45, +0.45] is extremely wide, meaning the true difference could be anywhere from -45% to +45%
+- In production, you'd run this for days/weeks with thousands of sessions to get meaningful results
+
+**What this proves:** The A/B testing infrastructure works correctly. The Gateway split traffic, both bundles were applied, the online eval scored sessions, and statistical analysis was performed. At workshop scale (30 requests), you simply can't detect small prompt improvements — that requires production-scale traffic.
+
+### Step 8: Promote the Winner
+
+When the treatment wins (isSignificant: true, pValue < 0.05, positive percentChange, confidence interval doesn't cross zero):
+
+1. Update the system prompt in your production agent (`main.py`) to use the winning prompt
+2. Update tool descriptions if the tool-description recommendations also showed improvement
+3. The winning variant's traces become the new baseline for your next optimization round
+
+**In our case:** No winner, so we keep the control and would need more traffic to reach a conclusion.
+
+### Architecture After Lab 9
+
+```
+                         ┌──────────────────────────────────────┐
+                         │           AgentCore Gateway           │
+                         │         (my-gateway-secure)           │
+                         │                                       │
+                         │  Targets:                             │
+                         │  ├─ WarrantyCheck (Lambda)            │
+                         │  ├─ ProcessRefund (Lambda)            │
+                         │  └─ customer-support-ab (http-runtime)│
+                         │                                       │
+                         │  Policy Engine: LOG_ONLY mode         │
+                         │  A/B Test: cs_prompt_abtest (RUNNING) │
+                         │    ├─ 80% → Control bundle            │
+                         │    └─ 20% → Treatment bundle          │
+                         └───────────────────┬──────────────────┘
+                                             │
+              ┌──────────────────────────────┼───────────────────────────┐
+              │                              │                           │
+   ┌──────────▼──────────┐    ┌─────────────▼────────────┐   ┌─────────▼──────────┐
+   │  CustomerSupport     │    │  CustomerSupportAB        │   │  OrderResearchAgent │
+   │  (Production)        │    │  (A/B Experimentation)    │   │  (Harness)          │
+   │                      │    │                           │   │                     │
+   │  • CUSTOM_JWT auth   │    │  • IAM auth (GW only)     │   │  • OAuth M2M        │
+   │  • Memory enabled    │    │  • No memory (stateless)  │   │  • Code Interpreter │
+   │  • QualityMonitor    │    │  • ABQualityMonitor        │   │  • HITL             │
+   │  • Fixed prompt      │    │  • Dynamic prompt (bundle) │   │  • Skills           │
+   └──────────────────────┘    └────────────────────────────┘   └─────────────────────┘
+```
+
+### The Full Optimization Loop (What Lab 9 Represents)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONTINUOUS IMPROVEMENT CYCLE                   │
+│                                                                   │
+│  1. OBSERVE: Agent runs in production → traces collected auto    │
+│       ↓                                                           │
+│  2. ANALYZE: `agentcore run recommendation` → AI reads traces   │
+│       ↓                                                           │
+│  3. HYPOTHESIZE: Generates optimized prompts/tool descriptions  │
+│       ↓                                                           │
+│  4. PACKAGE: Config bundles (control vs treatment)               │
+│       ↓                                                           │
+│  5. TEST: A/B test on live traffic (80/20 split)                │
+│       ↓                                                           │
+│  6. MEASURE: Online eval scores both variants automatically      │
+│       ↓                                                           │
+│  7. DECIDE: Statistical significance → promote or reject        │
+│       ↓                                                           │
+│  8. PROMOTE: Winner becomes new production prompt                │
+│       ↓                                                           │
+│  (repeat — winner's traces become next round's baseline)         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**This is NOT "loop engineering."** It's a one-time analysis + controlled experiment pattern. You run it when you want to improve, not continuously in a loop. Each cycle is: collect evidence → form hypothesis → test hypothesis → apply if validated.
+
+### Key Changes in Lab 9
+
+| File | Change |
+|------|--------|
+| `app/CustomerSupportAB/main.py` | NEW — Config-bundle-aware A/B agent with BeforeModelCallEvent hook |
+| `app/CustomerSupportAB/pyproject.toml` | NEW — Dependencies for AB runtime |
+| `agentcore/agentcore.json` | Added: CustomerSupportAB runtime, config bundles (control + treatment), ABQualityMonitor, customer-support-ab gateway target, policy mode → LOG_ONLY |
+
+### Deployed Resources After Lab 9
+
+| Resource | Count | Details |
+|----------|-------|---------|
+| Runtimes | 2 | CustomerSupport (production, JWT), CustomerSupportAB (A/B, IAM) |
+| Memories | 1 | SharedMemory (SEMANTIC + SUMMARIZATION) |
+| Credentials | 1 | gateway-egress-oauth (OAuth for Harness) |
+| Gateways | 1 | my-gateway-secure (3 targets: WarrantyCheck, ProcessRefund, customer-support-ab) |
+| Online Eval Configs | 2 | QualityMonitor (3 evaluators), ABQualityMonitor (1 evaluator) |
+| Policy Engines | 1 | CustomerSupportPolicyEngine (4 policies, LOG_ONLY mode) |
+| Config Bundles | 2 | customerSupportControl, customerSupportTreatment |
+| Harnesses | 3 | OrderResearchAgent, PersistentReportAgent, ContainerAgent |
+| A/B Tests | 1 | cs_prompt_abtest (RUNNING, 80/20 split) |
+
+### Commands Summary
+
+```bash
+# Generate recommendations from traces
+agentcore run recommendation --type system-prompt --runtime CustomerSupport --name cs-prompt-rec --days 1
+agentcore run recommendation --type tool-description --runtime CustomerSupport --name cs-tool-rec --days 1
+
+# Create A/B runtime
+agentcore add agent --name CustomerSupportAB --language Python --framework Strands --model-provider Bedrock --memory none --build CodeZip
+
+# Add gateway target for A/B
+agentcore add gateway-target --name customer-support-ab --gateway my-gateway-secure --type http-runtime --runtime CustomerSupportAB
+
+# Create config bundles
+agentcore add config-bundle --name customerSupportControl --commit-message "Baseline prompt" --components '...'
+agentcore add config-bundle --name customerSupportTreatment --commit-message "Recommended prompt" --components '...'
+
+# Create A/B online eval
+agentcore add online-eval --name ABQualityMonitor --runtime CustomerSupportAB --evaluator Builtin.GoalSuccessRate --sampling-rate 100 --enable-on-create
+
+# Deploy everything
+agentcore deploy -y -v
+
+# Launch A/B test
+agentcore run ab-test --mode config-bundle --name cs_prompt_abtest --gateway my-gateway-secure --runtime CustomerSupportAB --control-bundle customerSupportControl --control-version LATEST --treatment-bundle customerSupportTreatment --treatment-version LATEST --online-eval ABQualityMonitor --control-weight 80 --treatment-weight 20
+
+# Switch policies to LOG_ONLY for test
+jq '...' agentcore/agentcore.json > tmp && mv tmp agentcore/agentcore.json
+agentcore deploy -y -v
+
+# Generate load
+bash loadgen.sh
+
+# Check results
+agentcore view ab-test $AB_TEST_ID --json
+
+# Cleanup
+agentcore stop ab-test -i $AB_TEST_ID
+agentcore archive ab-test -i $AB_TEST_ID
+```
+
+---
+
+## Workshop Complete — Full Architecture Summary
+
+| Lab | What You Built | Key Concept |
+|-----|---------------|-------------|
+| 1 | Agent prototype with local tools | Strands SDK + AgentCore Runtime |
+| 2 | Persistent memory across sessions | SEMANTIC + SUMMARIZATION strategies |
+| 3 | Centralized tools via Gateway | MCP protocol, Lambda targets |
+| 4 | Security with JWT authentication | Cognito, CUSTOM_JWT, verified identity |
+| 5 | Continuous quality monitoring | Online eval, LLM-as-a-Judge |
+| 6 | Customer-facing chat interface | Flask + REST API + streaming |
+| 7 | Fine-grained governance | Cedar policies, default-deny |
+| 8 | Zero-code agents | Harness, OAuth M2M, HITL, Skills |
+| 9 | Data-driven optimization | Traces → Recommendations → A/B test → Promote |

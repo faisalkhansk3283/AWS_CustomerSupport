@@ -30,6 +30,15 @@
           ]
         }
       }
+    },
+    {
+      "name": "CustomerSupportAB",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/CustomerSupportAB/",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP"
     }
   ],
   "memories": [
@@ -76,6 +85,15 @@
       ],
       "samplingRate": 100,
       "enableOnCreate": true
+    },
+    {
+      "name": "ABQualityMonitor",
+      "agent": "CustomerSupportAB",
+      "evaluators": [
+        "Builtin.GoalSuccessRate"
+      ],
+      "samplingRate": 100,
+      "enableOnCreate": true
     }
   ],
   "agentCoreGateways": [
@@ -99,6 +117,13 @@
             "lambdaArn": "arn:aws:lambda:us-east-1:040880712607:function:workshop-process-refund",
             "toolSchemaFile": "app/CustomerSupport/tool/refund_schema.json"
           }
+        },
+        {
+          "name": "customer-support-ab",
+          "targetType": "httpRuntime",
+          "httpRuntime": {
+            "runtime": "CustomerSupportAB"
+          }
         }
       ],
       "authorizerType": "CUSTOM_JWT",
@@ -115,7 +140,7 @@
       "exceptionLevel": "NONE",
       "policyEngineConfiguration": {
         "policyEngineName": "CustomerSupportPolicyEngine",
-        "mode": "ENFORCE"
+        "mode": "LOG_ONLY"
       }
     }
   ],
@@ -168,7 +193,34 @@
       ]
     }
   ],
-  "configBundles": [],
+  "configBundles": [
+    {
+      "name": "customerSupportControl",
+      "type": "ConfigurationBundle",
+      "components": {
+        "{{runtime:CustomerSupportAB}}": {
+          "configuration": {
+            "system_prompt": "You are a helpful and professional customer support assistant for an e-commerce company. Provide accurate information using the tools available to you. Be friendly, patient, and understanding. Always offer additional help after answering. Always use tools to get accurate information rather than guessing."
+          }
+        }
+      },
+      "branchName": "mainline",
+      "commitMessage": "Baseline prompt"
+    },
+    {
+      "name": "customerSupportTreatment",
+      "type": "ConfigurationBundle",
+      "components": {
+        "{{runtime:CustomerSupportAB}}": {
+          "configuration": {
+            "system_prompt": "You are a helpful and professional customer support assistant for an e-commerce company. Provide accurate information using the tools available to you. Be friendly, patient, and understanding. Always offer additional help after answering. Always use tools to get accurate information rather than guessing—even if context seems sufficient, call tools for product/policy data.\n\nWhen a user requests a refund, process it with ProcessRefund using their stated amount and order ID. Do not question the amount or refuse based on context. Use \"customer dissatisfied\" as the reason instead of \"changed my mind.\" Use user_context directly for personal details (name, preferences) that tools cannot retrieve.\n\nBefore taking any unrequested action, state the plan and wait for explicit approval."
+          }
+        }
+      },
+      "branchName": "mainline",
+      "commitMessage": "Recommended prompt from cs-prompt-rec"
+    }
+  ],
   "abTests": [],
   "harnesses": [
     {
